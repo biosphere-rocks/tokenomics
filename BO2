@@ -1,0 +1,171 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/structs/EnumerableSet.sol";
+
+contract BO2Token is ERC20, Ownable, ReentrancyGuard {
+    using EnumerableSet for EnumerableSet.AddressSet;
+
+    uint256 private constant _initialSupply = 1000000000 * 10 ** 18; // 1,000,000,000 tokens
+
+    struct Proposal {
+        address proposer;
+        string description;
+        uint256 endTime;
+        uint256 forVotes;
+        uint256 againstVotes;
+        bool executed;
+        uint256 initiativeId;
+        mapping(address => bool) hasVoted;
+    }
+
+    struct Initiative {
+        string name;
+        address treasury;
+        string description;
+    }
+
+    mapping(uint256 => Proposal) public proposals;
+    uint256 public proposalCount;
+    EnumerableSet.AddressSet private voters;
+
+    mapping(uint256 => Initiative) public initiatives;
+    uint256 public initiativeCount;
+
+    // Vesting structures
+    struct VestingSchedule {
+        uint256 totalAmount;
+        uint256 amountReleased;
+        uint256 releaseTime;
+        uint256 releasePeriod;
+    }
+
+    mapping(address => VestingSchedule) public vestingSchedules;
+    mapping(address => bool) public vestedAddresses;
+
+    // Token distribution constants
+    uint256 private constant TEAM_ALLOCATION = _initialSupply * 15 / 100;
+    uint256 private constant INVESTORS_ALLOCATION = _initialSupply * 10 / 100;
+    uint256 private constant DAO_TREASURY = _initialSupply * 20 / 100;
+    uint256 private constant REWARDS_STAKING = _initialSupply * 20 / 100;
+    uint256 private constant SALES_ALLOCATION = _initialSupply * 25 / 100;
+    uint256 private constant ECOSYSTEM_DEVELOPMENT = _initialSupply * 10 / 100;
+
+    // Address for DAO treasury and rewards/staking
+    address public daoTreasury;
+    address public rewardsStaking;
+
+    constructor(
+        address _initialOwner, // Agregamos el argumento para el propietario inicial
+        address _daoTreasury,
+        address _rewardsStaking,
+        address _teamAddress,
+        address _investorsAddress,
+        address _ecosystemAddress
+    ) ERC20("Biosphere Rocks", "BO2") Ownable(_initialOwner) {
+        require(_daoTreasury != address(0), "Invalid DAO Treasury address");
+        require(_rewardsStaking != address(0), "Invalid Rewards/Staking address");
+
+        daoTreasury = _daoTreasury;
+        rewardsStaking = _rewardsStaking;
+
+        // Mint initial supply to the contract
+        _mint(address(this), _initialSupply);
+
+        // Distribute tokens according to the plan
+        _transfer(address(this), _teamAddress, TEAM_ALLOCATION);
+        _transfer(address(this), _investorsAddress, INVESTORS_ALLOCATION);
+        _transfer(address(this), daoTreasury, DAO_TREASURY);
+        _transfer(address(this), rewardsStaking, REWARDS_STAKING);
+        _transfer(address(this), _ecosystemAddress, ECOSYSTEM_DEVELOPMENT);
+
+        // Set vesting schedules
+        setVestingSchedule(_teamAddress, TEAM_ALLOCATION, block.timestamp + 730 days, 30 days); // 2 years vesting
+        setVestingSchedule(_investorsAddress, INVESTORS_ALLOCATION, block.timestamp + 365 days, 30 days); // 1 year vesting
+    }
+
+    function setVestingSchedule(address _beneficiary, uint256 _totalAmount, uint256 _releaseTime, uint256 _releasePeriod) internal onlyOwner {
+        require(_beneficiary != address(0), "Invalid beneficiary address");
+        require(_totalAmount > 0, "Amount should be > 0");
+        require(_releaseTime > block.timestamp, "Release time should be in the future");
+
+        vestingSchedules[_beneficiary] = VestingSchedule({
+            totalAmount: _totalAmount,
+            amountReleased: 0,
+            releaseTime: _releaseTime,
+            releasePeriod: _releasePeriod
+        });
+
+        vestedAddresses[_beneficiary] = true;
+    }
+
+    function releaseVestedTokens() public nonReentrant {
+        require(vestedAddresses[msg.sender], "No vested tokens for this address");
+
+        VestingSchedule storage schedule = vestingSchedules[msg.sender];
+        require(block.timestamp >= schedule.releaseTime, "Tokens are still locked");
+
+        uint256 unreleased = releasableAmount(schedule);
+        require(unreleased > 0, "No tokens to release");
+
+        schedule.amountReleased += unreleased;
+        _transfer(address(this), msg.sender, unreleased);
+    }
+
+    function releasableAmount(VestingSchedule memory schedule) public view returns (uint256) {
+        if (block.timestamp < schedule.releaseTime) {
+            return 0;
+        }
+
+        uint256 periodsElapsed = (block.timestamp - schedule.releaseTime) / schedule.releasePeriod;
+        uint256 totalReleasable = (schedule.totalAmount * periodsElapsed * schedule.releasePeriod) / 365 days;
+        uint256 unreleased = totalReleasable - schedule.amountReleased;
+
+        return unreleased;
+    }
+
+    function burn(uint256 amount) public {
+        _burn(msg.sender, amount);
+    }
+
+    function addInitiative(string memory name, address treasury, string memory description) public onlyOwner {
+        require(treasury != address(0), "Invalid treasury address");
+
+        initiativeCount++;
+        initiatives[initiativeCount] = Initiative({
+            name: name,
+            treasury: treasury,
+            description: description
+        });
+    }
+
+    // Function to add addresses to the voters list
+    function addVoter(address voter) public onlyOwner {
+        voters.add(voter);
+    }
+
+    // Function to remove addresses from the voters list
+    function removeVoter(address voter) public onlyOwner {
+        voters.remove(voter);
+    }
+
+    // Function to get the list of voters
+    function getVoters() public view returns (address[] memory) {
+        return voters.values();
+    }
+
+    // Function to transfer ownership of DAO treasury
+    function transferDaoTreasuryOwnership(address newOwner) public onlyOwner {
+        require(newOwner != address(0), "Invalid new owner address");
+        Ownable(daoTreasury).transferOwnership(newOwner);
+    }
+
+    // Function to transfer ownership of rewards/staking
+    function transferRewardsStakingOwnership(address newOwner) public onlyOwner {
+        require(newOwner != address(0), "Invalid new owner address");
+        Ownable(rewardsStaking).transferOwnership(newOwner);
+    }
+}
